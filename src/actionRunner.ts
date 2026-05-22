@@ -1,99 +1,81 @@
-import * as core from '@actions/core';
-import * as path from 'path';
-import { parsePackage } from './packageParser';
-import { resolveDependencies, detectCycles } from './dependencyResolver';
-import { renderMermaidGraph, renderMarkdownComment } from './graphRenderer';
-import { getOctokit, getPullRequestContext } from './githubClient';
-import { glob } from 'glob';
+import * as core from "@actions/core";
+import { getOctokit, getPullRequestContext } from "./githubClient";
+import { findPackageJsonFiles } from "./packageScanner";
+import { parsePackage } from "./packageParser";
+import { resolveDependencies, detectCycles } from "./dependencyResolver";
+import { renderMermaidGraph, renderMarkdownComment } from "./graphRenderer";
+import { formatComment, formatErrorComment } from "./commentFormatter";
+import { getCachedPackages, setCachedPackages } from "./cacheManager";
+import { applyDepGraphLabel, removeDepGraphLabel } from "./labelManager";
 
 export interface ActionInputs {
-  workspaceRoot: string;
   token: string;
-  commentHeader: string;
+  workspaceRoot: string;
+  cacheEnabled: boolean;
 }
 
 export function getInputs(): ActionInputs {
   return {
-    workspaceRoot: core.getInput('workspace-root') || process.env.GITHUB_WORKSPACE || process.cwd(),
-    token: core.getInput('github-token', { required: true }),
-    commentHeader: core.getInput('comment-header') || '## 📦 Dependency Graph',
+    token: core.getInput("github-token", { required: true }),
+    workspaceRoot: core.getInput("workspace-root") || process.cwd(),
+    cacheEnabled: core.getInput("cache") !== "false",
   };
 }
 
-export async function run(inputs: ActionInputs): Promise<void> {
-  core.info('Scanning monorepo for package.json files...');
+export async function run(): Promise<void> {
+  try {
+    const inputs = getInputs();
+    const octokit = getOctokit(inputs.token);
+    const prCtx = getPullRequestContext();
 
-  const packageFiles = await glob('**/package.json', {
-    cwd: inputs.workspaceRoot,
-    ignore: ['**/node_modules/**'],
-    absolute: true,
-  });
+    if (!prCtx) {
+      core.warning("Not running in a pull request context — skipping.");
+      return;
+    }
 
-  if (packageFiles.length === 0) {
-    core.warning('No package.json files found in workspace.');
-    return;
-  }
+    const { owner, repo, prNumber } = prCtx;
+    const labelCtx = { octokit, owner, repo, prNumber };
 
-  const packages = await Promise.all(
-    packageFiles.map((file) => parsePackage(path.dirname(file)))
-  );
+    const files = await findPackageJsonFiles(inputs.workspaceRoot);
+    core.info(`Found ${files.length} package.json file(s).`);
 
-  const validPackages = packages.filter((pkg): pkg is NonNullable<typeof pkg> => pkg !== null);
-  core.info(`Found ${validPackages.length} packages.`);
+    let packages = inputs.cacheEnabled ? await getCachedPackages(files) : null;
 
-  const graph = resolveDependencies(validPackages);
-  const cycles = detectCycles(graph);
+    if (!packages) {
+      packages = await Promise.all(files.map((f) => parsePackage(f)));
+      if (inputs.cacheEnabled) {
+        await setCachedPackages(files, packages);
+      }
+    }
 
-  if (cycles.length > 0) {
-    core.warning(`Detected circular dependencies: ${cycles.map((c) => c.join(' → ')).join('; ')}`);
-  }
+    const graph = resolveDependencies(packages);
+    const cycles = detectCycles(graph);
+    const mermaid = renderMermaidGraph(graph);
+    const body = renderMarkdownComment(mermaid, cycles);
+    const comment = formatComment(body);
 
-  const mermaid = renderMermaidGraph(graph);
-  const comment = renderMarkdownComment(mermaid, inputs.commentHeader, cycles);
+    const { default: CommentManager } = await import("./commentManager");
+    const manager = new CommentManager(octokit, owner, repo);
+    await manager.upsertComment(prNumber, comment);
+    await applyDepGraphLabel(labelCtx);
 
-  const octokit = getOctokit(inputs.token);
-  const context = getPullRequestContext();
-
-  if (!context) {
-    core.info('Not running in a pull request context. Skipping comment.');
-    return;
-  }
-
-  await postOrUpdateComment(octokit, context, comment, inputs.commentHeader);
-  core.info('Dependency graph comment posted successfully.');
-}
-
-async function postOrUpdateComment(
-  octokit: ReturnType<typeof getOctokit>,
-  context: NonNullable<ReturnType<typeof getPullRequestContext>>,
-  body: string,
-  header: string
-): Promise<void> {
-  const { owner, repo, pullNumber } = context;
-
-  const { data: comments } = await octokit.rest.issues.listComments({
-    owner,
-    repo,
-    issue_number: pullNumber,
-  });
-
-  const existing = comments.find(
-    (c) => c.user?.type === 'Bot' && c.body?.includes(header)
-  );
-
-  if (existing) {
-    await octokit.rest.issues.updateComment({
-      owner,
-      repo,
-      comment_id: existing.id,
-      body,
-    });
-  } else {
-    await octokit.rest.issues.createComment({
-      owner,
-      repo,
-      issue_number: pullNumber,
-      body,
-    });
+    core.info("Dependency graph posted successfully.");
+  } catch (err: any) {
+    const errorBody = formatErrorComment(err.message ?? String(err));
+    core.setFailed(err.message ?? String(err));
+    try {
+      const inputs = getInputs();
+      const octokit = getOctokit(inputs.token);
+      const prCtx = getPullRequestContext();
+      if (prCtx) {
+        const { owner, repo, prNumber } = prCtx;
+        const { default: CommentManager } = await import("./commentManager");
+        const manager = new CommentManager(octokit, owner, repo);
+        await manager.upsertComment(prNumber, errorBody);
+        await removeDepGraphLabel({ octokit, owner, repo, prNumber });
+      }
+    } catch {
+      // best-effort
+    }
   }
 }
