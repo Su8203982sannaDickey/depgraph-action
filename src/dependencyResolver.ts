@@ -1,95 +1,75 @@
-import * as path from 'path';
-import * as fs from 'fs';
+import { ParsedPackage } from './packageParser';
 
-export interface PackageNode {
+export interface ResolvedPackage {
   name: string;
   version: string;
-  localDependencies: string[];
+  path: string;
+  localDeps: string[];
+  allDeps: string[];
 }
 
-export interface DependencyGraph {
-  nodes: PackageNode[];
-  edges: Array<{ from: string; to: string }>;
-}
+export function resolveDependencies(
+  packages: ParsedPackage[]
+): ResolvedPackage[] {
+  const nameSet = new Set(packages.map((p) => p.name));
 
-/**
- * Given a list of package.json paths, resolves internal (monorepo) dependencies
- * between packages and builds a directed dependency graph.
- */
-export function resolveDependencies(packageJsonPaths: string[]): DependencyGraph {
-  const packageMap = new Map<string, PackageNode>();
-
-  // First pass: collect all package names
-  for (const pkgPath of packageJsonPaths) {
-    const raw = fs.readFileSync(pkgPath, 'utf-8');
-    const json = JSON.parse(raw);
-    const name: string = json.name;
-    const version: string = json.version ?? '0.0.0';
-    packageMap.set(name, { name, version, localDependencies: [] });
-  }
-
-  // Second pass: resolve local deps
-  for (const pkgPath of packageJsonPaths) {
-    const raw = fs.readFileSync(pkgPath, 'utf-8');
-    const json = JSON.parse(raw);
-    const name: string = json.name;
-    const allDeps: Record<string, string> = {
-      ...(json.dependencies ?? {}),
-      ...(json.devDependencies ?? {}),
-      ...(json.peerDependencies ?? {}),
+  return packages.map((pkg) => {
+    const allDeps = [
+      ...Object.keys(pkg.dependencies ?? {}),
+      ...Object.keys(pkg.devDependencies ?? {}),
+      ...Object.keys(pkg.peerDependencies ?? {}),
+    ];
+    const localDeps = allDeps.filter((dep) => nameSet.has(dep));
+    return {
+      name: pkg.name,
+      version: pkg.version,
+      path: pkg.path,
+      localDeps,
+      allDeps,
     };
-
-    const node = packageMap.get(name)!;
-    for (const dep of Object.keys(allDeps)) {
-      if (packageMap.has(dep)) {
-        node.localDependencies.push(dep);
-      }
-    }
-  }
-
-  const nodes = Array.from(packageMap.values());
-  const edges = nodes.flatMap((node) =>
-    node.localDependencies.map((dep) => ({ from: node.name, to: dep }))
-  );
-
-  return { nodes, edges };
+  });
 }
 
-/**
- * Detects circular dependencies in the graph using DFS.
- * Returns an array of cycles (each cycle is an array of package names).
- */
-export function detectCycles(graph: DependencyGraph): string[][] {
-  const adjacency = new Map<string, string[]>();
-  for (const node of graph.nodes) {
-    adjacency.set(node.name, node.localDependencies);
+export function detectCycles(packages: ResolvedPackage[]): string[][] {
+  const graph = new Map<string, string[]>();
+  for (const pkg of packages) {
+    graph.set(pkg.name, pkg.localDeps);
   }
 
+  const cycles: string[][] = [];
   const visited = new Set<string>();
   const stack = new Set<string>();
-  const cycles: string[][] = [];
 
-  function dfs(node: string, path: string[]): void {
-    if (stack.has(node)) {
-      const cycleStart = path.indexOf(node);
-      cycles.push(path.slice(cycleStart));
-      return;
+  for (const pkg of packages) {
+    if (!visited.has(pkg.name)) {
+      dfs(pkg.name, graph, visited, stack, [], cycles);
     }
-    if (visited.has(node)) return;
-
-    visited.add(node);
-    stack.add(node);
-
-    for (const neighbor of adjacency.get(node) ?? []) {
-      dfs(neighbor, [...path, neighbor]);
-    }
-
-    stack.delete(node);
-  }
-
-  for (const node of graph.nodes) {
-    dfs(node.name, [node.name]);
   }
 
   return cycles;
+}
+
+export function dfs(
+  node: string,
+  graph: Map<string, string[]>,
+  visited: Set<string>,
+  stack: Set<string>,
+  path: string[],
+  cycles: string[][]
+): void {
+  visited.add(node);
+  stack.add(node);
+  path.push(node);
+
+  for (const neighbor of graph.get(node) ?? []) {
+    if (!visited.has(neighbor)) {
+      dfs(neighbor, graph, visited, stack, path, cycles);
+    } else if (stack.has(neighbor)) {
+      const cycleStart = path.indexOf(neighbor);
+      cycles.push(path.slice(cycleStart));
+    }
+  }
+
+  path.pop();
+  stack.delete(node);
 }
