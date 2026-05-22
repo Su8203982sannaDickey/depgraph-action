@@ -1,74 +1,94 @@
-import * as fs from 'fs'
-import * as path from 'path'
+import * as fs from 'fs';
+import * as path from 'path';
+import { glob } from 'glob';
 
-export interface PackageInfo {
-  name: string
-  version: string
-  dependencies: Record<string, string>
-  devDependencies: Record<string, string>
-  location: string
+export interface PackageNode {
+  name: string;
+  version?: string;
+  location: string;
 }
 
-export interface MonorepoGraph {
-  packages: PackageInfo[]
-  edges: Array<{ from: string; to: string }>
+export interface GraphEdge {
+  from: string;
+  to: string;
 }
 
-export function findWorkspacePackages(rootDir: string): string[] {
-  const rootPkgPath = path.join(rootDir, 'package.json')
+export interface Graph {
+  nodes: PackageNode[];
+  edges: GraphEdge[];
+}
+
+export interface PackageJson {
+  name: string;
+  version?: string;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  workspaces?: string[] | { packages: string[] };
+}
+
+export async function findWorkspacePackages(rootDir: string): Promise<PackageNode[]> {
+  const rootPkgPath = path.join(rootDir, 'package.json');
   if (!fs.existsSync(rootPkgPath)) {
-    throw new Error(`No package.json found at ${rootDir}`)
+    throw new Error(`No package.json found at ${rootDir}`);
   }
 
-  const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, 'utf-8'))
-  const workspaces: string[] = rootPkg.workspaces ?? []
+  const rootPkg: PackageJson = JSON.parse(fs.readFileSync(rootPkgPath, 'utf-8'));
+  const workspaces = rootPkg.workspaces;
 
-  const packagePaths: string[] = []
-  for (const pattern of workspaces) {
-    const resolvedPattern = pattern.replace(/\*$/, '')
-    const baseDir = path.join(rootDir, resolvedPattern)
-    if (fs.existsSync(baseDir)) {
-      const entries = fs.readdirSync(baseDir, { withFileTypes: true })
-      for (const entry of entries) {
-        if (entry.isDirectory()) {
-          const pkgPath = path.join(baseDir, entry.name)
-          if (fs.existsSync(path.join(pkgPath, 'package.json'))) {
-            packagePaths.push(pkgPath)
-          }
+  if (!workspaces) {
+    throw new Error('No workspaces field found in root package.json');
+  }
+
+  const patterns = Array.isArray(workspaces) ? workspaces : workspaces.packages;
+  const packages: PackageNode[] = [];
+
+  for (const pattern of patterns) {
+    const matches = await glob(pattern, { cwd: rootDir, absolute: true });
+    for (const match of matches) {
+      const pkgJsonPath = path.join(match, 'package.json');
+      if (fs.existsSync(pkgJsonPath)) {
+        const pkg = parsePackage(pkgJsonPath);
+        if (pkg) {
+          packages.push({ ...pkg, location: match });
         }
       }
     }
   }
 
-  return packagePaths
+  return packages;
 }
 
-export function parsePackage(pkgDir: string): PackageInfo {
-  const pkgJsonPath = path.join(pkgDir, 'package.json')
-  const raw = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'))
-  return {
-    name: raw.name ?? path.basename(pkgDir),
-    version: raw.version ?? '0.0.0',
-    dependencies: raw.dependencies ?? {},
-    devDependencies: raw.devDependencies ?? {},
-    location: pkgDir
+export function parsePackage(pkgJsonPath: string): Omit<PackageNode, 'location'> | null {
+  try {
+    const content: PackageJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+    if (!content.name) return null;
+    return { name: content.name, version: content.version };
+  } catch {
+    return null;
   }
 }
 
-export function buildGraph(rootDir: string): MonorepoGraph {
-  const packagePaths = findWorkspacePackages(rootDir)
-  const packages = packagePaths.map(parsePackage)
-  const packageNames = new Set(packages.map(p => p.name))
+export async function buildGraph(rootDir: string): Promise<Graph> {
+  const packages = await findWorkspacePackages(rootDir);
+  const packageNames = new Set(packages.map(p => p.name));
+  const edges: GraphEdge[] = [];
 
-  const edges: Array<{ from: string; to: string }> = []
   for (const pkg of packages) {
-    const allDeps = { ...pkg.dependencies, ...pkg.devDependencies }
+    const pkgJsonPath = path.join(pkg.location, 'package.json');
+    const content: PackageJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+    const allDeps = {
+      ...content.dependencies,
+      ...content.devDependencies,
+      ...content.peerDependencies,
+    };
+
     for (const dep of Object.keys(allDeps)) {
       if (packageNames.has(dep)) {
-        edges.push({ from: pkg.name, to: dep })
+        edges.push({ from: pkg.name, to: dep });
       }
     }
   }
 
-  return { packages, edges }
+  return { nodes: packages, edges };
 }
