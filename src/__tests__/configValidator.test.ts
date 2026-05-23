@@ -1,60 +1,56 @@
 import { validateConfig, assertValidConfig } from '../configValidator';
-import { DepgraphConfig } from '../configLoader';
 
 describe('validateConfig', () => {
-  it('returns valid for empty config', () => {
-    expect(validateConfig({})).toEqual({ valid: true, errors: [] });
+  it('returns no errors for a valid full config', () => {
+    const errors = validateConfig({
+      maxDepth: 3,
+      scope: ['@myorg'],
+      include: ['packages/*'],
+      exclude: ['packages/legacy'],
+      label: 'depgraph',
+      rootPackages: ['app'],
+    });
+    expect(errors).toHaveLength(0);
   });
 
-  it('returns valid for fully specified correct config', () => {
-    const config: DepgraphConfig = {
-      ignore: ['**/dist/**'],
-      scopes: ['@app'],
-      maxDepth: 4,
-      showDevDependencies: true,
-      labelName: 'deps',
-      commentHeader: '## Graph',
-    };
-    expect(validateConfig(config).valid).toBe(true);
+  it('returns no errors for an empty config object', () => {
+    expect(validateConfig({})).toHaveLength(0);
   });
 
-  it('errors when maxDepth is zero', () => {
-    const result = validateConfig({ maxDepth: 0 });
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain('maxDepth must be a positive number');
+  it('rejects non-object configs', () => {
+    expect(validateConfig(null)).toEqual([{ field: 'root', message: 'Config must be a plain object' }]);
+    expect(validateConfig('string')).toEqual([{ field: 'root', message: 'Config must be a plain object' }]);
+    expect(validateConfig([])).toEqual([{ field: 'root', message: 'Config must be a plain object' }]);
   });
 
-  it('errors when maxDepth is negative', () => {
-    const result = validateConfig({ maxDepth: -1 });
-    expect(result.valid).toBe(false);
+  it('rejects negative maxDepth', () => {
+    const errors = validateConfig({ maxDepth: -1 });
+    expect(errors).toEqual([{ field: 'maxDepth', message: 'maxDepth must be a non-negative integer' }]);
   });
 
-  it('errors when ignore is not an array', () => {
-    const result = validateConfig({ ignore: 'bad' as unknown as string[] });
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain('ignore must be an array of strings');
+  it('rejects non-integer maxDepth', () => {
+    const errors = validateConfig({ maxDepth: 1.5 });
+    expect(errors[0].field).toBe('maxDepth');
   });
 
-  it('errors when ignore contains non-strings', () => {
-    const result = validateConfig({ ignore: [123] as unknown as string[] });
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain('all entries in ignore must be strings');
+  it('rejects non-array scope', () => {
+    const errors = validateConfig({ scope: 'not-an-array' });
+    expect(errors[0].field).toBe('scope');
   });
 
-  it('errors when scopes is not an array', () => {
-    const result = validateConfig({ scopes: '@app' as unknown as string[] });
-    expect(result.valid).toBe(false);
+  it('rejects array with non-string items', () => {
+    const errors = validateConfig({ include: [1, 2] });
+    expect(errors[0].field).toBe('include');
   });
 
-  it('errors when showDevDependencies is not boolean', () => {
-    const result = validateConfig({ showDevDependencies: 'yes' as unknown as boolean });
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain('showDevDependencies must be a boolean');
+  it('rejects empty label string', () => {
+    const errors = validateConfig({ label: '   ' });
+    expect(errors[0].field).toBe('label');
   });
 
   it('collects multiple errors', () => {
-    const result = validateConfig({ maxDepth: -5, showDevDependencies: 'no' as unknown as boolean });
-    expect(result.errors.length).toBeGreaterThanOrEqual(2);
+    const errors = validateConfig({ maxDepth: -1, label: '' });
+    expect(errors.length).toBeGreaterThanOrEqual(2);
   });
 });
 
@@ -63,7 +59,7 @@ describe('assertValidConfig', () => {
     expect(() => assertValidConfig({ maxDepth: 2 })).not.toThrow();
   });
 
-  it('throws with error list for invalid config', () => {
-    expect(() => assertValidConfig({ maxDepth: -1 })).toThrow('Invalid depgraph config');
+  it('throws with descriptive message for invalid config', () => {
+    expect(() => assertValidConfig({ maxDepth: -5 })).toThrow('Invalid depgraph config');
   });
 });
