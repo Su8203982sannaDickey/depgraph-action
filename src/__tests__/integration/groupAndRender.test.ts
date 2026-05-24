@@ -20,6 +20,13 @@ function setupMonorepo(): ResolvedPackage[] {
   ];
 }
 
+/** Returns the names of all packages across all groups, sorted. */
+function allGroupedPackageNames(packages: ResolvedPackage[], options?: Parameters<typeof applyGrouping>[1]): string[] {
+  return applyGrouping(packages, options)
+    .flatMap((g) => g.packages.map((p) => p.name))
+    .sort();
+}
+
 describe('groupAndRender integration', () => {
   const packages = setupMonorepo();
 
@@ -58,5 +65,15 @@ describe('groupAndRender integration', () => {
     expect(groups.length).toBeGreaterThan(0);
     const allPkgs = groups.flatMap((g) => g.packages);
     expect(allPkgs).toHaveLength(packages.length);
+  });
+
+  it('no packages are lost or duplicated during grouping', () => {
+    const originalNames = packages.map((p) => p.name).sort();
+    expect(allGroupedPackageNames(packages)).toEqual(originalNames);
+  });
+
+  it('no packages are lost or duplicated during directory-based grouping', () => {
+    const originalNames = packages.map((p) => p.name).sort();
+    expect(allGroupedPackageNames(packages, { groupByDirectory: true })).toEqual(originalNames);
   });
 });
